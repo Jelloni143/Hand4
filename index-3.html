@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Hand Tracking — Mr.Hem</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+    touch-action: none;
+  }
+  #app { position: relative; width: 100vw; height: 100vh; }
+  #videoEl {
+    position: absolute;
+    width: 1px; height: 1px;
+    opacity: 0; pointer-events: none;
+  }
+  #threeCanvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 1;
+  }
+  #title {
+    position: absolute;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    font-size: clamp(11px, 2.5vw, 15px);
+    font-family: 'Courier New', monospace;
+    letter-spacing: 0.35em;
+    color: #00f5ff;
+    text-transform: uppercase;
+    white-space: nowrap;
+    text-shadow:
+      0 0 6px #00f5ff,
+      0 0 18px #00f5ff,
+      0 0 40px #00aeff,
+      0 0 80px #0066ff;
+    animation: titlePulse 3s ease-in-out infinite;
+  }
+  @keyframes titlePulse {
+    0%,100% { opacity: 1; text-shadow: 0 0 6px #00f5ff, 0 0 18px #00f5ff, 0 0 40px #00aeff, 0 0 80px #0066ff; }
+    50% { opacity: 0.85; text-shadow: 0 0 4px #00f5ff, 0 0 12px #00f5ff, 0 0 30px #00aeff, 0 0 60px #0066ff; }
+  }
+  #modeLabel {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%,-50%);
+    z-index: 20;
+    font-size: clamp(18px, 5vw, 36px);
+    font-family: 'Courier New', monospace;
+    letter-spacing: 0.3em;
+    color: #fff;
+    text-transform: uppercase;
+    pointer-events: none;
+    opacity: 0;
+    text-shadow: 0 0 20px #00f5ff, 0 0 50px #00aeff;
+    transition: opacity 0.3s;
+  }
+  #statusDot {
+    position: absolute;
+    bottom: 28px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #ff4444;
+    box-shadow: 0 0 10px #ff4444;
+    transition: background 0.4s, box-shadow 0.4s;
+  }
+  #statusDot.active {
+    background: #00ff88;
+    box-shadow: 0 0 10px #00ff88, 0 0 25px #00ff88;
+  }
+  #hint {
+    position: absolute;
+    bottom: 48px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: rgba(0,245,255,0.4);
+    white-space: nowrap;
+    font-family: 'Courier New', monospace;
+  }
+  #scanline {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 5;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,245,255,0.012) 2px,
+      rgba(0,245,255,0.012) 4px
+    );
+    animation: scanMove 8s linear infinite;
+  }
+  @keyframes scanMove {
+    0% { background-position: 0 0; }
+    100% { background-position: 0 100px; }
+  }
+  #cornerTL, #cornerTR, #cornerBL, #cornerBR {
+    position: absolute;
+    z-index: 10;
+    width: 30px; height: 30px;
+    pointer-events: none;
+    opacity: 0.5;
+  }
+  #cornerTL { top:8px; left:8px; border-top: 1.5px solid #00f5ff; border-left: 1.5px solid #00f5ff; }
+  #cornerTR { top:8px; right:8px; border-top: 1.5px solid #00f5ff; border-right: 1.5px solid #00f5ff; }
+  #cornerBL { bottom:8px; left:8px; border-bottom: 1.5px solid #00f5ff; border-left: 1.5px solid #00f5ff; }
+  #cornerBR { bottom:8px; right:8px; border-bottom: 1.5px solid #00f5ff; border-right: 1.5px solid #00f5ff; }
+</style>
+</head>
+<body>
+<div id="app">
+  <video id="videoEl" playsinline autoplay muted></video>
+  <canvas id="threeCanvas"></canvas>
+  <div id="scanline"></div>
+  <div id="cornerTL"></div>
+  <div id="cornerTR"></div>
+  <div id="cornerBL"></div>
+  <div id="cornerBR"></div>
+  <div id="title">DEVELOPER &nbsp; Mr.Hem</div>
+  <div id="modeLabel"></div>
+  <div id="hint">SWIPE TWO FINGERS TO SWITCH MODE</div>
+  <div id="statusDot"></div>
+</div>
+
+<!-- Three.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- MediaPipe -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script>
+"use strict";
+
+// ─── GLOBALS ─────────────────────────────────────────────────────────────────
+const W = () => window.innerWidth, H = () => window.innerHeight;
+let currentMode = 0; // 0=dragon, 1=box
+let handData = null;
+let prevHandData = null;
+let swipeDetector = { startX: null, frames: 0 };
+
+// ─── THREE SETUP ─────────────────────────────────────────────────────────────
+const canvas = document.getElementById('threeCanvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W(), H());
+renderer.setClearColor(0x000508, 1);
+renderer.shadowMap.enabled = false;
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000508, 0.04);
+
+const camera = new THREE.PerspectiveCamera(60, W() / H(), 0.1, 200);
+camera.position.set(0, 0, 8);
+
+window.addEventListener('resize', () => {
+  renderer.setSize(W(), H());
+  camera.aspect = W() / H();
+  camera.updateProjectionMatrix();
+});
+
+// ─── LIGHTING ─────────────────────────────────────────────────────────────────
+const ambientLight = new THREE.AmbientLight(0x001122, 2);
+scene.add(ambientLight);
+const pointLight1 = new THREE.PointLight(0x00f5ff, 3, 30);
+pointLight1.position.set(5, 5, 5);
+scene.add(pointLight1);
+const pointLight2 = new THREE.PointLight(0xff00aa, 2, 25);
+pointLight2.position.set(-5, -3, 3);
+scene.add(pointLight2);
+
+// ─── BACKGROUND PARTICLES ────────────────────────────────────────────────────
+(function createStarfield() {
+  const geo = new THREE.BufferGeometry();
+  const count = 800;
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    positions[i*3]   = (Math.random() - 0.5) * 120;
+    positions[i*3+1] = (Math.random() - 0.5) * 120;
+    positions[i*3+2] = (Math.random() - 0.5) * 80 - 20;
+    const c = Math.random();
+    colors[i*3]   = c * 0.3;
+    colors[i*3+1] = c * 0.8 + 0.2;
+    colors[i*3+2] = 1;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({ size: 0.08, vertexColors: true, transparent: true, opacity: 0.7 });
+  scene.add(new THREE.Points(geo, mat));
+})();
+
+// ─── CURSOR / HAND INDICATOR ──────────────────────────────────────────────────
+const cursorGroup = new THREE.Group();
+scene.add(cursorGroup);
+{
+  const ringGeo = new THREE.RingGeometry(0.12, 0.16, 32);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x00f5ff, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+  cursorGroup.add(new THREE.Mesh(ringGeo, ringMat));
+  const dotGeo = new THREE.SphereGeometry(0.04, 8, 8);
+  const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  cursorGroup.add(new THREE.Mesh(dotGeo, dotMat));
+}
+cursorGroup.visible = false;
+
+// ─── FINGER DOTS ──────────────────────────────────────────────────────────────
+const fingerDots = [];
+for (let i = 0; i < 5; i++) {
+  const geo = new THREE.SphereGeometry(0.05, 6, 6);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.8 });
+  const mesh = new THREE.Mesh(geo, mat);
+  scene.add(mesh);
+  mesh.visible = false;
+  fingerDots.push(mesh);
+}
+
+// ─── UTILITY: map hand coords to 3D ──────────────────────────────────────────
+function handTo3D(lm, idx) {
+  const x = (0.5 - lm[idx].x) * 10;
+  const y = (0.5 - lm[idx].y) * 10 * (H() / W());
+  return new THREE.Vector3(x, y, 0);
+}
+
+function palmCenter(lm) {
+  return handTo3D(lm, 9);
+}
+
+// ─── PINCH DETECTION ─────────────────────────────────────────────────────────
+function pinchStrength(lm) {
+  const thumb = new THREE.Vector3(lm[4].x, lm[4].y, lm[4].z);
+  const index = new THREE.Vector3(lm[8].x, lm[8].y, lm[8].z);
+  const dist = thumb.distanceTo(index);
+  return Math.max(0, 1 - dist * 18);
+}
+
+// ─── FIST DETECTION ──────────────────────────────────────────────────────────
+function isFist(lm) {
+  let closedCount = 0;
+  const tips = [8, 12, 16, 20];
+  const bases = [5, 9, 13, 17];
+  for (let i = 0; i < 4; i++) {
+    if (lm[tips[i]].y > lm[bases[i]].y) closedCount++;
+  }
+  return closedCount >= 3;
+}
+
+// ─── SPREAD DETECTION ────────────────────────────────────────────────────────
+function handSpread(lm) {
+  const tips = [4, 8, 12, 16, 20];
+  let maxDist = 0;
+  for (let i = 0; i < tips.length; i++) {
+    for (let j = i+1; j < tips.length; j++) {
+      const d = Math.hypot(lm[tips[i]].x - lm[tips[j]].x, lm[tips[i]].y - lm[tips[j]].y);
+      maxDist = Math.max(maxDist, d);
+    }
+  }
+  return maxDist;
+}
+
+// ─── SWIPE DETECTION ─────────────────────────────────────────────────────────
+function detectSwipe(lm) {
+  if (!lm) { swipeDetector.startX = null; swipeDetector.frames = 0; return 0; }
+  const indexX = lm[8].x;
+  const middleX = lm[12].x;
+  const avgX = (indexX + middleX) / 2;
+  if (swipeDetector.startX === null) {
+    swipeDetector.startX = avgX;
+    swipeDetector.frames = 0;
+    return 0;
+  }
+  swipeDetector.frames++;
+  const delta = swipeDetector.startX - avgX;
+  if (swipeDetector.frames > 5 && swipeDetector.frames < 25) {
+    if (Math.abs(delta) > 0.18) {
+      const dir = delta > 0 ? 1 : -1;
+      swipeDetector.startX = null;
+      swipeDetector.frames = 0;
+      return dir;
+    }
+  }
+  if (swipeDetector.frames >= 25) {
+    swipeDetector.startX = avgX;
+    swipeDetector.frames = 0;
+  }
+  return 0;
+}
+
+// ─── MODE LABEL FLASH ────────────────────────────────────────────────────────
+const modeLabel = document.getElementById('modeLabel');
+let modeLabelTimer = null;
+function showModeLabel(text) {
+  modeLabel.textContent = text;
+  modeLabel.style.opacity = '1';
+  if (modeLabelTimer) clearTimeout(modeLabelTimer);
+  modeLabelTimer = setTimeout(() => { modeLabel.style.opacity = '0'; }, 1800);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODE 1: DRAGON
+// ═══════════════════════════════════════════════════════════════════════════════
+const dragonGroup = new THREE.Group();
+scene.add(dragonGroup);
+
+function buildDragon() {
+  // Body
+  const bodyGeo = new THREE.CapsuleGeometry ? new THREE.CapsuleGeometry(0.55, 1.4, 8, 12) :
+    (() => { const g = new THREE.CylinderGeometry(0.45, 0.55, 1.4, 10); return g; })();
+  const bodyMat = new THREE.MeshPhongMaterial({ color: 0x1a0a2e, emissive: 0x220033, shininess: 80, specular: 0x6600aa });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  dragonGroup.add(body);
+
+  // Scales overlay
+  const scaleGeo = new THREE.IcosahedronGeometry(0.58, 2);
+  const scaleMat = new THREE.MeshPhongMaterial({ color: 0x2a0050, wireframe: false, emissive: 0x110022, transparent: true, opacity: 0.6 });
+  dragonGroup.add(new THREE.Mesh(scaleGeo, scaleMat));
+
+  // Head
+  const headGeo = new THREE.SphereGeometry(0.38, 10, 8);
+  const headMat = new THREE.MeshPhongMaterial({ color: 0x1a0a2e, emissive: 0x330044, shininess: 100 });
+  const head = new THREE.Mesh(headGeo, headMat);
+  head.position.set(0, 1.15, 0.1);
+  head.scale.set(1, 0.9, 1.1);
+  dragonGroup.add(head);
+
+  // Snout
+  const snoutGeo = new THREE.ConeGeometry(0.18, 0.45, 8);
+  const snout = new THREE.Mesh(snoutGeo, headMat);
+  snout.rotation.x = Math.PI / 2;
+  snout.position.set(0, 1.12, 0.5);
+  dragonGroup.add(snout);
+
+  // Eyes
+  const eyeGeo = new THREE.SphereGeometry(0.08, 8, 8);
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff3300 });
+  const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+  eyeL.position.set(-0.18, 1.3, 0.28);
+  const eyeR = eyeL.clone();
+  eyeR.position.set(0.18, 1.3, 0.28);
+  dragonGroup.add(eyeL, eyeR);
+
+  // Eye glow lights
+  const eyeGlowL = new THREE.PointLight(0xff2200, 1.5, 2);
+  eyeGlowL.position.copy(eyeL.position);
+  const eyeGlowR = new THREE.PointLight(0xff2200, 1.5, 2);
+  eyeGlowR.position.copy(eyeR.position);
+  dragonGroup.add(eyeGlowL, eyeGlowR);
+
+  // Horns
+  const hornGeo = new THREE.ConeGeometry(0.05, 0.35, 6);
+  const hornMat = new THREE.MeshPhongMaterial({ color: 0x440088, emissive: 0x220044 });
+  const hornL = new THREE.Mesh(hornGeo, hornMat);
+  hornL.position.set(-0.15, 1.6, 0.0);
+  hornL.rotation.z = -0.3;
+  const hornR = hornL.clone();
+  hornR.position.set(0.15, 1.6, 0.0);
+  hornR.rotation.z = 0.3;
+  dragonGroup.add(hornL, hornR);
+
+  // Wings — two halves each
+  function makeWing(side) {
+    const wingGroup = new THREE.Group();
+    const pts = [];
+    for (let i = 0; i <= 6; i++) {
+      pts.push(new THREE.Vector2(i * 0.35, Math.sin(i * 0.5) * 0.25));
+    }
+    const wingShape = new THREE.Shape();
+    wingShape.moveTo(0, 0);
+    wingShape.lineTo(2.2, 0.3);
+    wingShape.lineTo(2.0, 0.9);
+    wingShape.lineTo(1.4, 0.5);
+    wingShape.lineTo(1.1, 1.2);
+    wingShape.lineTo(0.6, 0.6);
+    wingShape.lineTo(0.3, 1.0);
+    wingShape.lineTo(0, 0.4);
+    wingShape.closePath();
+    const wingGeo = new THREE.ShapeGeometry(wingShape, 4);
+    const wingMat = new THREE.MeshPhongMaterial({
+      color: 0x2d0060, emissive: 0x110033,
+      side: THREE.DoubleSide, transparent: true, opacity: 0.88, shininess: 60
+    });
+    const wingMesh = new THREE.Mesh(wingGeo, wingMat);
+    wingGroup.add(wingMesh);
+    // Wing membrane lines
+    for (let i = 1; i <= 5; i++) {
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(2.0 * (i / 5), 0.2 + i * 0.12, 0)
+      ]);
+      const lineMat = new THREE.LineBasicMaterial({ color: 0xaa00ff, transparent: true, opacity: 0.6 });
+      wingGroup.add(new THREE.Line(lineGeo, lineMat));
+    }
+    wingGroup.position.set(side * 0.5, 0.2, 0);
+    wingGroup.scale.x = side;
+    dragonGroup.add(wingGroup);
+    return wingGroup;
+  }
+  const wingL = makeWing(-1);
+  const wingR = makeWing(1);
+
+  // Tail
+  const tailCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0, -0.7, 0),
+    new THREE.Vector3(0.3, -1.2, 0.1),
+    new THREE.Vector3(0.5, -1.8, 0.2),
+    new THREE.Vector3(0.3, -2.3, 0.0),
+    new THREE.Vector3(-0.1, -2.7, -0.1),
+  ]);
+  const tailGeo = new THREE.TubeGeometry(tailCurve, 12, 0.08, 6, false);
+  const tailMesh = new THREE.Mesh(tailGeo, bodyMat);
+  dragonGroup.add(tailMesh);
+
+  return { wingL, wingR, eyeGlowL, eyeGlowR };
+}
+
+const dragonParts = buildDragon();
+dragonGroup.scale.setScalar(0.8);
+
+// Dragon body glow
+const dragonGlow = new THREE.PointLight(0xaa00ff, 2, 6);
+dragonGroup.add(dragonGlow);
+
+// ─── FIRE PARTICLES ──────────────────────────────────────────────────────────
+const FIRE_COUNT = 200;
+const firePositions = new Float32Array(FIRE_COUNT * 3);
+const fireColors = new Float32Array(FIRE_COUNT * 3);
+const fireSizes = new Float32Array(FIRE_COUNT);
+const fireVelocities = [];
+const fireAlpha = new Float32Array(FIRE_COUNT);
+const fireAlphas = new Float32Array(FIRE_COUNT);
+const fireActive = new Array(FIRE_COUNT).fill(false);
+let fireParticleIdx = 0;
+
+const fireGeo = new THREE.BufferGeometry();
+fireGeo.setAttribute('position', new THREE.BufferAttribute(firePositions, 3));
+fireGeo.setAttribute('color', new THREE.BufferAttribute(fireColors, 3));
+fireGeo.setAttribute('size', new THREE.BufferAttribute(fireSizes, 1));
+
+// Make a circular sprite texture
+function makeCircleTexture(color1, color2, size = 64) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  g.addColorStop(0, color1);
+  g.addColorStop(1, color2);
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(size/2, size/2, size/2, 0, Math.PI*2);
+  ctx.fill();
+  return new THREE.CanvasTexture(c);
+}
+
+const fireSpriteTex = makeCircleTexture('rgba(255,200,50,1)', 'rgba(255,0,0,0)');
+const fireMat = new THREE.PointsMaterial({
+  size: 0.4, map: fireSpriteTex, vertexColors: true,
+  blending: THREE.AdditiveBlending, depthWrite: false, transparent: true
+});
+const fireSystem = new THREE.Points(fireGeo, fireMat);
+scene.add(fireSystem);
+
+for (let i = 0; i < FIRE_COUNT; i++) {
+  fireVelocities.push(new THREE.Vector3());
+  fireAlpha[i] = 0;
+  firePositions[i*3] = 9999; // hidden
+}
+
+function spawnFireParticle(origin) {
+  const i = fireParticleIdx % FIRE_COUNT;
+  fireParticleIdx++;
+  fireActive[i] = true;
+  firePositions[i*3]   = origin.x + (Math.random()-0.5)*0.3;
+  firePositions[i*3+1] = origin.y + Math.random()*0.2;
+  firePositions[i*3+2] = origin.z + Math.random()*0.4 + 0.3;
+  const speed = 0.04 + Math.random()*0.06;
+  const spread = 0.03;
+  fireVelocities[i].set(
+    (Math.random()-0.5)*spread,
+    Math.random()*speed*0.5 + 0.01,
+    speed + Math.random()*0.04
+  );
+  fireSizes[i] = 0.3 + Math.random()*0.3;
+  fireAlpha[i] = 1.0;
+  const t = Math.random();
+  fireColors[i*3]   = 1;
+  fireColors[i*3+1] = t * 0.6;
+  fireColors[i*3+2] = 0;
+}
+
+function updateFire(origin, active) {
+  for (let i = 0; i < FIRE_COUNT; i++) {
+    if (!fireActive[i]) continue;
+    firePositions[i*3]   += fireVelocities[i].x;
+    firePositions[i*3+1] += fireVelocities[i].y;
+    firePositions[i*3+2] += fireVelocities[i].z;
+    fireAlpha[i] -= 0.025;
+    const a = Math.max(0, fireAlpha[i]);
+    fireColors[i*3+1] = a * 0.5;
+    fireSizes[i] *= 1.02;
+    if (fireAlpha[i] <= 0) {
+      fireActive[i] = false;
+      firePositions[i*3] = 9999;
+    }
+  }
+  if (active && origin) {
+    for (let k = 0; k < 6; k++) spawnFireParticle(origin);
+  }
+  fireGeo.attributes.position.needsUpdate = true;
+  fireGeo.attributes.color.needsUpdate = true;
+  fireGeo.attributes.size.needsUpdate = true;
+}
+
+// Dragon state
+const dragonState = {
+  pos: new THREE.Vector3(0, 0, 0),
+  targetPos: new THREE.Vector3(0, 0, 0),
+  scale: 1,
+  targetScale: 1,
+  rotY: 0,
+  targetRotY: 0,
+  breathing: false,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODE 2: BOX CREATION
+// ═══════════════════════════════════════════════════════════════════════════════
+const boxGroup = new THREE.Group();
+scene.add(boxGroup);
+const boxes = [];
+let heldBox = null;
+let prevPinch = false;
+let createCooldown = 0;
+
+const BOX_COLORS = [0x00f5ff, 0xff00aa, 0x00ff88, 0xffaa00, 0x8800ff, 0xff4444];
+
+function makeBoxEdges(size, color) {
+  const geo = new THREE.BoxGeometry(size, size, size);
+  const edges = new THREE.EdgesGeometry(geo);
+  const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1.0 });
+  const mesh = new THREE.LineSegments(edges, mat);
+  return mesh;
+}
+
+function createBox(pos) {
+  const color = BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)];
+  const size = 0.3 + Math.random() * 0.3;
+  const group = new THREE.Group();
+
+  // Solid interior (faint)
+  const faceGeo = new THREE.BoxGeometry(size, size, size);
+  const faceMat = new THREE.MeshPhongMaterial({
+    color, emissive: color, emissiveIntensity: 0.15,
+    transparent: true, opacity: 0.12, wireframe: false
+  });
+  group.add(new THREE.Mesh(faceGeo, faceMat));
+
+  // Glowing edges
+  const edgeMesh = makeBoxEdges(size, color);
+  group.add(edgeMesh);
+
+  // Inner glow
+  const glowGeo = new THREE.BoxGeometry(size*1.1, size*1.1, size*1.1);
+  const glowMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.05, side: THREE.BackSide });
+  group.add(new THREE.Mesh(glowGeo, glowMat));
+
+  group.position.copy(pos);
+  group.userData = {
+    vel: new THREE.Vector3((Math.random()-0.5)*0.005, (Math.random()-0.5)*0.005, 0),
+    rotVel: new THREE.Vector3(Math.random()*0.01, Math.random()*0.01, Math.random()*0.005),
+    color, held: false, size
+  };
+  boxGroup.add(group);
+  boxes.push(group);
+
+  // Point light for glow
+  const light = new THREE.PointLight(color, 1.5, 2.5);
+  group.add(light);
+
+  return group;
+}
+
+// Box sparkles
+const SPARK_COUNT = 300;
+const sparkPositions = new Float32Array(SPARK_COUNT * 3);
+const sparkColors = new Float32Array(SPARK_COUNT * 3);
+const sparkVels = [];
+const sparkLife = new Float32Array(SPARK_COUNT);
+let sparkIdx = 0;
+
+for (let i = 0; i < SPARK_COUNT; i++) {
+  sparkPositions[i*3] = 9999;
+  sparkVels.push(new THREE.Vector3());
+  sparkLife[i] = 0;
+}
+
+const sparkGeo = new THREE.BufferGeometry();
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPositions, 3));
+sparkGeo.setAttribute('color', new THREE.BufferAttribute(sparkColors, 3));
+const sparkTex = makeCircleTexture('rgba(255,255,255,1)', 'rgba(0,200,255,0)');
+const sparkMat = new THREE.PointsMaterial({
+  size: 0.12, map: sparkTex, vertexColors: true,
+  blending: THREE.AdditiveBlending, depthWrite: false, transparent: true
+});
+scene.add(new THREE.Points(sparkGeo, sparkMat));
+
+function spawnSparks(pos, color) {
+  const r = (color >> 16 & 0xff) / 255;
+  const g = (color >> 8 & 0xff) / 255;
+  const b = (color & 0xff) / 255;
+  for (let k = 0; k < 8; k++) {
+    const i = sparkIdx % SPARK_COUNT;
+    sparkIdx++;
+    sparkPositions[i*3]   = pos.x;
+    sparkPositions[i*3+1] = pos.y;
+    sparkPositions[i*3+2] = pos.z;
+    sparkVels[i].set((Math.random()-0.5)*0.1, (Math.random()-0.5)*0.1, (Math.random()-0.5)*0.1);
+    sparkLife[i] = 1.0;
+    sparkColors[i*3]   = r;
+    sparkColors[i*3+1] = g;
+    sparkColors[i*3+2] = b;
+  }
+}
+
+function updateSparks() {
+  for (let i = 0; i < SPARK_COUNT; i++) {
+    if (sparkLife[i] <= 0) continue;
+    sparkPositions[i*3]   += sparkVels[i].x;
+    sparkPositions[i*3+1] += sparkVels[i].y;
+    sparkPositions[i*3+2] += sparkVels[i].z;
+    sparkLife[i] -= 0.04;
+    if (sparkLife[i] <= 0) sparkPositions[i*3] = 9999;
+  }
+  sparkGeo.attributes.position.needsUpdate = true;
+}
+
+// ─── HAND TRACKING ───────────────────────────────────────────────────────────
+const video = document.getElementById('videoEl');
+const statusDot = document.getElementById('statusDot');
+
+const hands = new Hands({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+});
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 0,
+  minDetectionConfidence: 0.7,
+  minTrackingConfidence: 0.5
+});
+hands.onResults(results => {
+  prevHandData = handData;
+  handData = results.multiHandLandmarks && results.multiHandLandmarks.length > 0
+    ? results.multiHandLandmarks[0] : null;
+  statusDot.className = handData ? 'active' : '';
+});
+
+navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 320, height: 240 } })
+  .then(stream => {
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      video.play();
+      const cam = new Camera(video, {
+        onFrame: async () => { await hands.send({ image: video }); },
+        width: 320, height: 240
+      });
+      cam.start();
+    };
+  })
+  .catch(e => console.warn('Camera error:', e));
+
+// ─── ANIMATION LOOP ───────────────────────────────────────────────────────────
+let clock = { t: 0, dt: 0, last: performance.now() };
+
+function tick() {
+  requestAnimationFrame(tick);
+  const now = performance.now();
+  clock.dt = Math.min((now - clock.last) / 1000, 0.05);
+  clock.t += clock.dt;
+  clock.last = now;
+  const t = clock.t;
+
+  // Swipe to switch mode
+  if (handData) {
+    const sw = detectSwipe(handData);
+    if (sw !== 0) {
+      currentMode = (currentMode + 1) % 2;
+      showModeLabel(currentMode === 0 ? '⟡ DRAGON MODE ⟡' : '⟡ BOX MODE ⟡');
+      heldBox = null;
+    }
+  } else {
+    detectSwipe(null);
+  }
+
+  // Show/hide mode groups
+  dragonGroup.visible = (currentMode === 0);
+  fireSystem.visible = (currentMode === 0);
+  boxGroup.visible = (currentMode === 1);
+
+  // Cursor
+  if (handData) {
+    const palm = palmCenter(handData);
+    cursorGroup.visible = true;
+    cursorGroup.position.lerp(palm, 0.3);
+    cursorGroup.rotation.z += clock.dt * 1.5;
+
+    // Finger dots
+    const tipIndices = [4, 8, 12, 16, 20];
+    for (let i = 0; i < 5; i++) {
+      const p = handTo3D(handData, tipIndices[i]);
+      fingerDots[i].visible = true;
+      fingerDots[i].position.lerp(p, 0.25);
+    }
+  } else {
+    cursorGroup.visible = false;
+    fingerDots.forEach(d => d.visible = false);
+  }
+
+  // ── MODE 0: DRAGON ─────────────────────────────────────────────────────────
+  if (currentMode === 0) {
+    const lm = handData;
+
+    // Floating idle
+    dragonGroup.position.y += Math.sin(t * 0.8) * 0.003;
+
+    if (lm) {
+      const palm = palmCenter(lm);
+      dragonState.targetPos.copy(palm);
+      dragonState.targetPos.z = 0;
+
+      // Rotation from hand x
+      dragonState.targetRotY = (lm[9].x - 0.5) * 1.8;
+
+      // Scale from spread
+      const spread = handSpread(lm);
+      const scaleFactor = 0.5 + spread * 4.5;
+      dragonState.targetScale = Math.max(0.3, Math.min(2.2, scaleFactor));
+
+      // Fire breath on fist
+      dragonState.breathing = isFist(lm);
+    } else {
+      dragonState.targetPos.set(0, 0, 0);
+      dragonState.targetScale = 1;
+      dragonState.targetRotY = 0;
+      dragonState.breathing = false;
+    }
+
+    dragonGroup.position.lerp(dragonState.targetPos, 0.08);
+    dragonState.scale += (dragonState.targetScale - dragonState.scale) * 0.08;
+    dragonGroup.scale.setScalar(dragonState.scale * 0.8);
+    dragonState.rotY += (dragonState.targetRotY - dragonState.rotY) * 0.08;
+    dragonGroup.rotation.y = dragonState.rotY;
+
+    // Wing flap
+    if (dragonParts.wingL && dragonParts.wingR) {
+      const flapAmt = Math.sin(t * 3) * 0.4;
+      dragonParts.wingL.rotation.z = flapAmt - 0.2;
+      dragonParts.wingR.rotation.z = -flapAmt + 0.2;
+    }
+
+    // Eye pulse
+    const eyePulse = 0.8 + Math.sin(t * 4) * 0.5;
+    dragonParts.eyeGlowL.intensity = eyePulse;
+    dragonParts.eyeGlowR.intensity = eyePulse;
+
+    // Dragon body glow pulse
+    dragonGlow.intensity = 1.5 + Math.sin(t * 2) * 0.5;
+
+    // Fire origin = snout position in world
+    const snoutOffset = new THREE.Vector3(0, 0.9, 0.5);
+    snoutOffset.applyQuaternion(dragonGroup.quaternion);
+    const fireOrigin = dragonGroup.position.clone().add(snoutOffset);
+    updateFire(fireOrigin, dragonState.breathing);
+  }
+
+  // ── MODE 1: BOXES ──────────────────────────────────────────────────────────
+  if (currentMode === 1) {
+    const lm = handData;
+    const pinch = lm ? pinchStrength(lm) : 0;
+    const isPinching = pinch > 0.7;
+
+    if (createCooldown > 0) createCooldown--;
+
+    if (lm) {
+      const palm = palmCenter(lm);
+
+      if (isPinching && !prevPinch && createCooldown <= 0) {
+        // Create or grab nearest box
+        let nearest = null, nearDist = 1.2;
+        for (const b of boxes) {
+          const d = b.position.distanceTo(palm);
+          if (d < nearDist) { nearest = b; nearDist = d; }
+        }
+        if (nearest) {
+          heldBox = nearest;
+          heldBox.userData.held = true;
+        } else {
+          heldBox = createBox(palm.clone());
+          heldBox.userData.held = true;
+          spawnSparks(palm, heldBox.userData.color);
+          createCooldown = 20;
+        }
+      }
+
+      if (!isPinching && prevPinch && heldBox) {
+        heldBox.userData.held = false;
+        heldBox.userData.vel.set(
+          (Math.random()-0.5)*0.015,
+          Math.random()*0.01,
+          0
+        );
+        spawnSparks(heldBox.position, heldBox.userData.color);
+        heldBox = null;
+      }
+
+      if (heldBox && isPinching) {
+        heldBox.position.lerp(palm, 0.2);
+        // Rotate with hand x movement
+        if (prevHandData) {
+          const dx = (lm[9].x - prevHandData[9].x) * 8;
+          const dy = (lm[9].y - prevHandData[9].y) * 8;
+          heldBox.rotation.y += dx;
+          heldBox.rotation.x += dy;
+        }
+      }
+    } else {
+      if (heldBox) { heldBox.userData.held = false; heldBox = null; }
+    }
+
+    prevPinch = isPinching;
+
+    // Update all boxes
+    for (const box of boxes) {
+      if (!box.userData.held) {
+        box.position.add(box.userData.vel);
+        box.rotation.x += box.userData.rotVel.x;
+        box.rotation.y += box.userData.rotVel.y;
+        box.rotation.z += box.userData.rotVel.z;
+        // Bounce softly
+        if (Math.abs(box.position.x) > 5) box.userData.vel.x *= -1;
+        if (Math.abs(box.position.y) > 4) box.userData.vel.y *= -1;
+        // Add sparkles occasionally
+        if (Math.random() < 0.02) spawnSparks(box.position, box.userData.color);
+      }
+    }
+
+    updateSparks();
+  }
+
+  // Lights animation
+  pointLight1.position.x = Math.sin(t * 0.5) * 6;
+  pointLight1.position.y = Math.cos(t * 0.3) * 4;
+  pointLight2.position.x = Math.cos(t * 0.4) * 5;
+  pointLight2.position.y = Math.sin(t * 0.6) * 4;
+
+  renderer.render(scene, camera);
+}
+
+tick();
+
+// ─── TOUCH FALLBACK (no camera) ───────────────────────────────────────────────
+let touchMode = false;
+canvas.addEventListener('touchstart', e => { touchMode = true; }, { passive: true });
+canvas.addEventListener('touchmove', e => {
+  if (!touchMode) return;
+  const touch = e.touches[0];
+  const x = 1 - touch.clientX / W();
+  const y = touch.clientY / H();
+  handData = handData || Array.from({length:21}, () => ({x:0.5,y:0.5,z:0}));
+  for (let i = 0; i < 21; i++) { handData[i].x = x; handData[i].y = y; }
+}, { passive: true });
+
+</script>
+</body>
+</html>
